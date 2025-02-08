@@ -43,15 +43,11 @@ type pat =
 
 type p =
   | Call of triv * triv * cont
-  | Ret of cont * returnable
+  | Ret of cont * triv
   | CIf of triv * p * p
   | Let of rec_flag * pat * triv * p
   | Primop of pat * var * triv list * p
   | Letc of var * cont * p
-
-and returnable =
-  | Triv of triv
-  | Print of triv
 
 and cont =
   | Cont of pat * p
@@ -426,7 +422,7 @@ let rec cps_glob ?(main_id = 0) ds_ref_once ds_no_refs glob_env =
     match c with
     | AHALT | KVar _ ->
       let cont, arg, counts2 = bless_c_and_a c a in
-      Ret (cont, Triv arg), counts2
+      Ret (cont, arg), counts2
     | FCont (e, env, c') -> cps env e (ACont (a, c')) counts
     | ACont (a', c') -> call a' a c' counts
     | ICont (e1, e2, env, c') -> cif a e1 e2 c' env counts
@@ -457,15 +453,15 @@ let rec cps_glob ?(main_id = 0) ds_ref_once ds_no_refs glob_env =
     match f with
     | AVar v when String.equal v.hum_name "print" ->
       let arg, counts2 = blessa a counts in
-      let cont, counts3 = blessc c counts2 in
-      Ret (cont, Print arg), counts3
+      primop v [ arg ] c counts2
+      (* Ret (cont, Print arg), counts3 *)
     | AVar _ | AConst _ | AUnit | ATrivBinop _ | ATuple _ ->
       let func, counts2 = blessa f counts in
       let arg, counts3 = blessa a counts2 in
       let cont, counts4 = blessc c counts3 in
       Call (func, arg, cont), counts4
     | AClo (y, body, env) ->
-      bnd cps y a body env c (fun x arg b -> Ret (Cont (x, b), Triv arg)) counts
+      bnd cps y a body env c (fun x arg b -> Ret (Cont (x, b), arg)) counts
   and cif a e1 e2 c env counts =
     match c with
     (* unit size conts*)
@@ -579,7 +575,7 @@ let cps_program main_id ds_ref_once ds_no_refs vbs =
   let cps_glob = cps_glob ~main_id ds_ref_once ds_no_refs in
   let p, _ =
     match vbs with
-    | [] -> Ret (HALT, Triv TUnit), empty
+    | [] -> Ret (HALT, TUnit), empty
     | (NonRecursive, ds_pat, ds_expr) :: tl ->
       cps_glob (fst start_glob_envs) ds_expr (ToplevelLetNonRecCont (ds_pat, tl)) empty
     | (Recursive, ds_pat, ds_expr) :: tl ->
@@ -634,13 +630,9 @@ let cps_vb_to_parsetree_vb (rec_flag, pat, p) =
       (fun e1 ->
         helper_triv t2 (fun e2 -> helper_cont c (fun e3 -> eapp e1 [ e2; e3 ] |> k)))
       |> helper_triv t1
-    | Ret (HALT, Triv t) -> helper_triv t k
-    | Ret (HALT, Print t) -> (fun t -> eapp1 (evar "print") t |> k) |> helper_triv t
-    | Ret (c, Triv t) ->
+    | Ret (HALT, t) -> helper_triv t k
+    | Ret (c, t) ->
       (fun e1 -> helper_triv t (fun e2 -> eapp1 e1 e2 |> k)) |> helper_cont c
-    | Ret (c, Print t) ->
-      (fun e -> helper_triv t (fun arg -> eapp1 e (eapp1 (evar "print") arg) |> k))
-      |> helper_cont c
     | CIf (t, p1, p2) ->
       (fun e1 -> helper_p p1 (fun e2 -> helper_p p2 (fun e3 -> eite e1 e2 e3 |> k)))
       |> helper_triv t
@@ -760,21 +752,9 @@ let%expect_test "cps complex branching" =
 |}]
 ;;
 
-let%expect_test "cps double print" =
-  test_cps_vb {| let f g = print (print 1)|};
-  [%expect {| let f g k1 = (fun t2 -> k1 (print t2)) (print 1)
-|}]
-;;
-
-let%expect_test "cps arg-print " =
-  test_cps_vb {| let f = (fun x -> x) (print 1)|};
-  [%expect {| let f = (fun t1 -> t1) (print 1)
-|}]
-;;
-
 let%expect_test "cps print alias " =
-  test_cps_vb {| let f = let p = print in p 0|};
-  [%expect {| let f = print 0
+  test_cps_vb {| let f = let p = print in let z = p 0 in z + 1|};
+  [%expect {| let f = let x1 = print 0 in x1 + 1
 |}]
 ;;
 
@@ -825,7 +805,7 @@ let%expect_test "cps free vars" =
 ;;
 
 let%expect_test "cps func in func" =
-  test_cps_vb {| let z = let f = fun x -> print in f 2 3|};
-  [%expect {|  let z = (fun x -> print 3) 2
+  test_cps_vb {| let z = let rec g y = y in  let f = fun x -> g in f 2 3|};
+  [%expect {|  let z = let rec g y k1 = k1 y in (fun x -> g 3 (fun x -> x)) 2
 |}]
 ;;
