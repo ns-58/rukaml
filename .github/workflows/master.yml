@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - "master"
+      - "side_eff_handler"
 
 env:
   OPAMROOT: /home/opam/.opam
