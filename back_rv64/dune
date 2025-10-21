@@ -7,11 +7,17 @@
 (library
  (name rv64_impl)
  (public_name MiniML_rv64.impl)
- (modules RV64_impl Machine)
+ (modules RV64_impl Machine SoN)
  (wrapped false)
- (libraries rukaml.cconv rukaml.compile)
+ (libraries rukaml.cconv rukaml.compile rukaml.frontend)
  (preprocess
-  (pps bisect_ppx)))
+  (pps
+   ppx_expect
+   bisect_ppx
+   ppx_deriving.show
+   ;
+   ))
+ (inline_tests))
 
 (executable
  (name RV64_compiler)
@@ -40,7 +46,7 @@
  (deps rukaml_stdlib.c)
  (action
   (run
-   riscv64-linux-gnu-gcc-13
+   riscv64-linux-gnu-gcc
    -g
    -fPIC
    -Wall
