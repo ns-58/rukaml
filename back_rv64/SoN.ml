@@ -2,11 +2,11 @@ let todo () = failwith "todo"
 
 type start = cfg_out * consts
 and return = cfg_in * returned
-and const = Frontend.Parsetree.const * data_sucs
-and binop = string * data_pred * data_pred * data_sucs
-and ite = cfg_in * data_pred * cfg_out * cfg_out
+and const = Frontend.Parsetree.const * data_outs
+and binop = string * data_in * data_in * data_outs
+and ite = cfg_in * data_in * cfg_out * cfg_out
 and region = cfg_in * cfg_in * due_phi * cfg_out
-and phi = data_pred * data_pred * due_region * data_sucs
+and phi = data_in * data_in * due_region * data_outs
 
 and cfg_suc =
   [ `Return of return
@@ -37,9 +37,9 @@ and data_suc =
 
 and cfg_in = { mutable cfg_in : cfg_pred }
 and cfg_out = { mutable cfg_out : cfg_suc }
-and data_sucs = { mutable data_sucs : data_suc list }
+and data_outs = { mutable data_outs : data_suc list }
+and data_in = { mutable data_in : data_pred }
 
-(*ввести дата-предц, для мутабельности*)
 (*remove Const constructor ?*)
 and consts = { mutable consts : [ `Const of const ] list }
 and due_region = { mutable region : [ `Region of region ] }
@@ -69,7 +69,7 @@ let both f x1 x2 =
 
 let add_data_suc1 suc : data_pred -> unit = function
   | `Const (_, ds) | `BinOp (_, _, _, ds) | `Phi (_, _, _, ds) ->
-    ds.data_sucs <- suc :: ds.data_sucs
+    ds.data_outs <- suc :: ds.data_outs
 ;;
 
 type br =
@@ -98,7 +98,7 @@ let from_anf vb =
   | _, { hum_name = "main"; _ }, e ->
     let helper_a ~br = function
       | AConst c ->
-        let c = `Const (c, { data_sucs = [] }) in
+        let c = `Const (c, { data_outs = [] }) in
         add_const c;
         return c
       | AVar { hum_name = name; _ } -> find name
@@ -107,7 +107,7 @@ let from_anf vb =
     let rec helper_c ~br = function
       | CApp (APrimitive op, a1, [ a2 ]) when is_infix_binop op ->
         let+ a1, a2 = both (helper_a ~br) a1 a2 in
-        let bo = `BinOp (op, a1, a2, { data_sucs = [] }) in
+        let bo = `BinOp (op, { data_in = a1 }, { data_in = a2 }, { data_outs = [] }) in
         add_data_suc bo [ a1; a2 ];
         bo
       | CAtom i -> helper_a ~br i
@@ -116,7 +116,7 @@ let from_anf vb =
         let* env, control = get in
         let rec ite =
           let cfg_out = (region :> cfg_suc) in
-          `ITE ({ cfg_in = control }, cond, { cfg_out }, { cfg_out })
+          `ITE ({ cfg_in = control }, { data_in = cond }, { cfg_out }, { cfg_out })
         and region : [ `Region of region ] =
           `Region (th_cfg, el_cfg, ph, { cfg_out = (fin_node :> cfg_suc) })
         and th_cfg = { cfg_in = (ite :> cfg_pred) }
@@ -132,7 +132,9 @@ let from_anf vb =
         in
         let* phi =
           return (fun (d1, c1) (d2, c2) ->
-            let phi = `Phi (d1, d2, { region }, { data_sucs = [] }) in
+            let phi =
+              `Phi ({ data_in = d1 }, { data_in = d2 }, { region }, { data_outs = [] })
+            in
             let () = set_cfg_suc ~br (region :> cfg_suc) [ c1; c2 ] in
             let () = add_data_suc (phi :> data_suc) [ d1; d2 ] in
             th_cfg.cfg_in <- c1;
@@ -178,9 +180,9 @@ let print_sceleton () =
       in
       let ds =
         match n with
-        | `Const (_, { data_sucs })
-        | `BinOp (_, _, _, { data_sucs })
-        | `Phi (_, _, _, { data_sucs }) -> List.map (fun c -> (c :> node)) data_sucs
+        | `Const (_, { data_outs })
+        | `BinOp (_, _, _, { data_outs })
+        | `Phi (_, _, _, { data_outs }) -> List.map (fun c -> (c :> node)) data_outs
         | `Start _ | `Return _ | `ITE _ | `Region _ -> []
       in
       let opt = function
@@ -206,9 +208,9 @@ let print_sceleton () =
             (pp_print_list print_sh)
             ds;
           upd_queue ds
-        | `BinOp (op, d1, d2, _) ->
-          let d1 = (d1 :> node) in
-          let d2 = (d2 :> node) in
+        | `BinOp (op, { data_in }, { data_in = data_in' }, _) ->
+          let d1 = (data_in :> node) in
+          let d2 = (data_in' :> node) in
           fprintf
             ppf
             "Binop (%s, *%a, *%a, [%a])\n"
@@ -231,11 +233,11 @@ let print_sceleton () =
             (pp_print_option print_sh)
             returned;
           upd_queue @@ List.cons c1 @@ opt returned
-        | `ITE ({ cfg_in }, d, { cfg_out }, { cfg_out = cfg_out' }) ->
+        | `ITE ({ cfg_in }, { data_in }, { cfg_out }, { cfg_out = cfg_out' }) ->
           let c1 = (cfg_in :> node) in
           let c2 = (cfg_out :> node) in
           let c3 = (cfg_out' :> node) in
-          let d = (d :> node) in
+          let d = (data_in :> node) in
           fprintf
             ppf
             "ITE (*%a, *%a, %a, %a)\n"
@@ -265,9 +267,9 @@ let print_sceleton () =
             print_sh
             c3;
           upd_queue @@ List.append (opt phi) [ c1; c2; c3 ]
-        | `Phi (d1, d2, { region }, _) ->
-          let d1 = (d1 :> node) in
-          let d2 = (d2 :> node) in
+        | `Phi ({ data_in }, { data_in = data_in' }, { region }, _) ->
+          let d1 = (data_in :> node) in
+          let d2 = (data_in' :> node) in
           let r = (region :> node) in
           fprintf
             ppf
@@ -301,8 +303,8 @@ let equal () =
       List.fold_left2
         (fun acc x y -> acc && (x :> node) = (y :> node))
         true
-        d1.data_sucs
-        d2.data_sucs
+        d1.data_outs
+        d2.data_outs
     in
     let hashed_xy = Hashtbl.hash (x, y) in
     match Hashtbl.find seen hashed_xy with
@@ -320,8 +322,8 @@ let equal () =
          | `Const (data1, d1), `Const (data2, d2) -> Stdlib.( = ) data1 data2 && ds d1 d2
          | `BinOp (op1, a11, a12, d1), `BinOp (op2, a21, a22, d2) ->
            Stdlib.( = ) op1 op2
-           && (a11 :> node) = (a21 :> node)
-           && (a12 :> node) = (a22 :> node)
+           && (a11.data_in :> node) = (a21.data_in :> node)
+           && (a12.data_in :> node) = (a22.data_in :> node)
            && ds d1 d2
          | `Region (c11, c12, p1, c13), `Region (c21, c22, p2, c23) ->
            (c11.cfg_in :> node) = (c21.cfg_in :> node)
@@ -336,10 +338,10 @@ let equal () =
            (c11.cfg_in :> node) = (c21.cfg_in :> node)
            && (c12.cfg_out :> node) = (c22.cfg_out :> node)
            && (c13.cfg_out :> node) = (c23.cfg_out :> node)
-           && (d1 :> node) = (d2 :> node)
+           && (d1.data_in :> node) = (d2.data_in :> node)
          | `Phi (d11, d12, reg1, d1), `Phi (d21, d22, reg2, d2) ->
-           (d11 :> node) = (d21 :> node)
-           && (d12 :> node) = (d22 :> node)
+           (d11.data_in :> node) = (d21.data_in :> node)
+           && (d12.data_in :> node) = (d22.data_in :> node)
            && ds d1 d2
            && (reg1.region :> node) = (reg2.region :> node)
          | (`Start _ | `Return _ | `Const _ | `BinOp _ | `Phi _ | `ITE _ | `Region _), _
@@ -368,7 +370,7 @@ let from_string_vb ?(debug = false) text =
 let%test "ret0" =
   let rec start = { cfg_out = `Return fin }, { consts = [ `Const zero ] }
   and fin = { cfg_in = `Start start }, { returned = Some (`Const zero) }
-  and zero = Frontend.Parsetree.const_int 0, { data_sucs = [ `Return fin ] } in
+  and zero = Frontend.Parsetree.const_int 0, { data_outs = [ `Return fin ] } in
   let ( = ) = equal () in
   `Start (from_string_vb "let main = 0") = `Start start
 ;;
@@ -377,11 +379,19 @@ let%test "binops" =
   let rec start =
     { cfg_out = `Return fin }, { consts = [ `Const one; `Const three; `Const two ] }
   and fin = { cfg_in = `Start start }, { returned = Some (`BinOp sub2) }
-  and sub1 = "-", `Const two, `Const three, { data_sucs = [ `BinOp sub2 ] }
-  and sub2 = "-", `Const one, `BinOp sub1, { data_sucs = [ `Return fin ] }
-  and one = Frontend.Parsetree.const_int 1, { data_sucs = [ `BinOp sub2 ] }
-  and two = Frontend.Parsetree.const_int 2, { data_sucs = [ `BinOp sub1 ] }
-  and three = Frontend.Parsetree.const_int 3, { data_sucs = [ `BinOp sub1 ] } in
+  and sub1 =
+    ( "-"
+    , { data_in = `Const two }
+    , { data_in = `Const three }
+    , { data_outs = [ `BinOp sub2 ] } )
+  and sub2 =
+    ( "-"
+    , { data_in = `Const one }
+    , { data_in = `BinOp sub1 }
+    , { data_outs = [ `Return fin ] } )
+  and one = Frontend.Parsetree.const_int 1, { data_outs = [ `BinOp sub2 ] }
+  and two = Frontend.Parsetree.const_int 2, { data_outs = [ `BinOp sub1 ] }
+  and three = Frontend.Parsetree.const_int 3, { data_outs = [ `BinOp sub1 ] } in
   let ( = ) = equal () in
   `Start (from_string_vb "let main = 1 - (2 - 3) ") = `Start start
 ;;
@@ -392,12 +402,12 @@ let%test "if-then-else" =
     , { consts = [ `Const one; `Const two; `Const zero; `Const fls; `Const tr ] } )
   and ite1 =
     ( { cfg_in = `Start start }
-    , `Const tr
+    , { data_in = `Const tr }
     , { cfg_out = `Region reg1 }
     , { cfg_out = `ITE ite2 } )
   and ite2 =
     ( { cfg_in = `ITE ite1 }
-    , `Const fls
+    , { data_in = `Const fls }
     , { cfg_out = `Region reg2 }
     , { cfg_out = `Region reg2 } )
   and reg2 =
@@ -407,15 +417,21 @@ let%test "if-then-else" =
     let phi = Some (`Phi phi1) in
     { cfg_in = `ITE ite1 }, { cfg_in = `Region reg2 }, { phi }, { cfg_out = `Return fin }
   and phi2 =
-    `Const one, `Const two, { region = `Region reg2 }, { data_sucs = [ `Phi phi1 ] }
+    ( { data_in = `Const one }
+    , { data_in = `Const two }
+    , { region = `Region reg2 }
+    , { data_outs = [ `Phi phi1 ] } )
   and phi1 =
-    `Const zero, `Phi phi2, { region = `Region reg1 }, { data_sucs = [ `Return fin ] }
+    ( { data_in = `Const zero }
+    , { data_in = `Phi phi2 }
+    , { region = `Region reg1 }
+    , { data_outs = [ `Return fin ] } )
   and fin = { cfg_in = `Region reg1 }, { returned = Some (`Phi phi1) }
-  and tr = Frontend.Parsetree.const_bool true, { data_sucs = [ `ITE ite1 ] }
-  and fls = Frontend.Parsetree.const_bool false, { data_sucs = [ `ITE ite2 ] }
-  and zero = Frontend.Parsetree.const_int 0, { data_sucs = [ `Phi phi1 ] }
-  and one = Frontend.Parsetree.const_int 1, { data_sucs = [ `Phi phi2 ] }
-  and two = Frontend.Parsetree.const_int 2, { data_sucs = [ `Phi phi2 ] } in
+  and tr = Frontend.Parsetree.const_bool true, { data_outs = [ `ITE ite1 ] }
+  and fls = Frontend.Parsetree.const_bool false, { data_outs = [ `ITE ite2 ] }
+  and zero = Frontend.Parsetree.const_int 0, { data_outs = [ `Phi phi1 ] }
+  and one = Frontend.Parsetree.const_int 1, { data_outs = [ `Phi phi2 ] }
+  and two = Frontend.Parsetree.const_int 2, { data_outs = [ `Phi phi2 ] } in
   let ( = ) = equal () in
   `Start (from_string_vb "let main =  if true then 0 else if false then 1 else 2     ")
   = `Start start
