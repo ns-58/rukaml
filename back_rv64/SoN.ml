@@ -178,7 +178,7 @@ let print_sceleton () =
         match n with
         | `Const (_, { data_outs })
         | `BinOp (_, _, _, { data_outs })
-        | `Phi (_, _, { data_outs }) -> List.map (fun c -> (c :> node)) data_outs
+        | `Phi (_, _, { data_outs }) -> (data_outs :> node list)
         | `Start _ | `Return _ | `ITE _ | `Region _ -> []
       in
       let opt = function
@@ -192,7 +192,7 @@ let print_sceleton () =
         (match n with
         | `Start ({ cfg_out }, { consts }) ->
           let c = (cfg_out :> node) in
-          let cs = List.map (fun c -> (c :> node)) consts in
+          let cs = (consts :> node list) in
           fprintf ppf "Start (%a, [%a])\n" print_sh c (pp_print_list print_sh) cs;
           upd_queue (c :: cs)
         | `Const (data, _) ->
@@ -220,7 +220,7 @@ let print_sceleton () =
           upd_queue (d1 :: d2 :: ds)
         | `Return ({ cfg_in }, { returned }) ->
           let c1 = (cfg_in :> node) in
-          let returned = Option.map (fun r -> (r :> node)) returned in
+          let returned = (Option.map (fun r -> (r :> node))) returned in
           fprintf
             ppf
             "Return (*%a, *%a)\n"
@@ -247,9 +247,9 @@ let print_sceleton () =
             c3;
           upd_queue [ c1; d; c2; c3 ]
         | `Region ({ cfg_ins }, { phis }, { cfg_out }) ->
-          let cf = List.map (fun i -> (i :> node)) cfg_ins in
+          let cf = (cfg_ins :> node list) in
           let co = (cfg_out :> node) in
-          let phis = List.map (fun r -> (r :> node)) phis in
+          let phis = (phis :> node list) in
           fprintf
             ppf
             "Region (*[%a], [%a], %a)\n"
@@ -261,7 +261,7 @@ let print_sceleton () =
             co;
           upd_queue @@ (co :: cf) @ phis
         | `Phi ({ data_ins }, { region }, _) ->
-          let dis = List.map (fun i -> (i :> node)) data_ins in
+          let dis = (data_ins :> node list) in
           let r = (region :> node) in
           fprintf
             ppf
@@ -288,28 +288,8 @@ let print_sceleton () =
 let equal () =
   let seen = Hashtbl.create 58 in
   let rec ( = ) x y =
-    let lists2 = List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true in
-    let lists2'
-      :  [< `Const of const | `Phi of phi ] list
-      -> [< `Const of const | `Phi of phi ] list
-      -> bool
-      =
-      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
-    in
-    (*to think about it. Maybe separate cast? *)
-    let lists2'' =
-      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
-    in
-    let lists2''' =
-      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
-    in
-    let ds d1 d2 =
-      List.fold_left2
-        (fun acc x y -> acc && (x :> node) = (y :> node))
-        true
-        d1.data_outs
-        d2.data_outs
-    in
+    let lists2 = List.fold_left2 (fun acc x y -> acc && x = y) true in
+    let ds d1 d2 = lists2 (d1.data_outs :> node list) (d2.data_outs :> node list) in
     let hashed_xy = Hashtbl.hash (x, y) in
     match Hashtbl.find seen hashed_xy with
     | () -> true
@@ -318,7 +298,8 @@ let equal () =
       (match
          match x, y with
          | `Start (c1, { consts = con1 }), `Start (c2, { consts = con2 }) ->
-           lists2' con1 con2 && (c1.cfg_out :> node) = (c2.cfg_out :> node)
+           lists2 (con1 :> node list) (con2 :> node list)
+           && (c1.cfg_out :> node) = (c2.cfg_out :> node)
          | `Return (c1, { returned = None }), `Return (c2, { returned = None }) ->
            (c1.cfg_in :> node) = (c2.cfg_in :> node)
          | `Return (c1, { returned = Some r1 }), `Return (c2, { returned = Some r2 }) ->
@@ -330,16 +311,16 @@ let equal () =
            && (a12.data_in :> node) = (a22.data_in :> node)
            && ds d1 d2
          | `Region (cc1, p1, co1), `Region (cc2, p2, co2) ->
-           lists2'' cc1.cfg_ins cc2.cfg_ins
+           lists2 (cc1.cfg_ins :> node list) (cc2.cfg_ins :> node list)
            && (co1.cfg_out :> node) = (co2.cfg_out :> node)
-           && lists2 p1.phis p2.phis
+           && lists2 (p1.phis :> node list) (p2.phis :> node list)
          | `ITE (c11, d1, c12, c13), `ITE (c21, d2, c22, c23) ->
            (c11.cfg_in :> node) = (c21.cfg_in :> node)
            && (c12.cfg_out :> node) = (c22.cfg_out :> node)
            && (c13.cfg_out :> node) = (c23.cfg_out :> node)
            && (d1.data_in :> node) = (d2.data_in :> node)
          | `Phi (dis1, reg1, d1), `Phi (dis2, reg2, d2) ->
-           lists2''' dis1.data_ins dis2.data_ins
+           lists2 (dis1.data_ins :> node list) (dis2.data_ins :> node list)
            && ds d1 d2
            && (reg1.region :> node) = (reg2.region :> node)
          | (`Start _ | `Return _ | `Const _ | `BinOp _ | `Phi _ | `ITE _ | `Region _), _
