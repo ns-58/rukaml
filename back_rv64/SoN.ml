@@ -5,8 +5,8 @@ and return = cfg_in * returned
 and const = Frontend.Parsetree.const * data_outs
 and binop = string * data_in * data_in * data_outs
 and ite = cfg_in * data_in * cfg_out * cfg_out
-and region = cfg_in * cfg_in * due_phi * cfg_out
-and phi = data_in * data_in * due_region * data_outs
+and region = cfg_ins * phis * cfg_out
+and phi = data_ins * due_region * data_outs
 
 and cfg_suc =
   [ `Return of return
@@ -36,14 +36,14 @@ and data_suc =
   ]
 
 and cfg_in = { mutable cfg_in : cfg_pred }
+and cfg_ins = { mutable cfg_ins : cfg_pred list }
 and cfg_out = { mutable cfg_out : cfg_suc }
 and data_outs = { mutable data_outs : data_suc list }
 and data_in = { mutable data_in : data_pred }
-
-(*remove Const constructor ?*)
+and data_ins = { mutable data_ins : data_pred list }
 and consts = { mutable consts : [ `Const of const ] list }
 and due_region = { mutable region : [ `Region of region ] }
-and due_phi = { mutable phi : [ `Phi of phi ] option }
+and phis = { mutable phis : [ `Phi of phi ] list }
 
 type node =
   [ data_pred
@@ -68,7 +68,7 @@ let both f x1 x2 =
 ;;
 
 let add_data_suc1 suc : data_pred -> unit = function
-  | `Const (_, ds) | `BinOp (_, _, _, ds) | `Phi (_, _, _, ds) ->
+  | `Const (_, ds) | `BinOp (_, _, _, ds) | `Phi (_, _, ds) ->
     ds.data_outs <- suc :: ds.data_outs
 ;;
 
@@ -78,7 +78,7 @@ type br =
 
 let set_cfg_suc1 ?(br = Then) suc : cfg_pred -> unit = function
   | `ITE (_, _, c, _) when br = Then -> c.cfg_out <- suc
-  | `Start (c, _) | `ITE (_, _, _, c) | `Region (_, _, _, c) -> c.cfg_out <- suc
+  | `Start (c, _) | `ITE (_, _, _, c) | `Region (_, _, c) -> c.cfg_out <- suc
 ;;
 
 let find k = get >>| fst >>| SMap.find k
@@ -118,10 +118,9 @@ let from_anf vb =
           let cfg_out = (region :> cfg_suc) in
           `ITE ({ cfg_in = control }, { data_in = cond }, { cfg_out }, { cfg_out })
         and region : [ `Region of region ] =
-          `Region (th_cfg, el_cfg, ph, { cfg_out = (fin_node :> cfg_suc) })
-        and th_cfg = { cfg_in = (ite :> cfg_pred) }
-        and el_cfg = { cfg_in = (ite :> cfg_pred) }
-        and ph = { phi = None } in
+          `Region (cf, ph, { cfg_out = (fin_node :> cfg_suc) })
+        and cf = { cfg_ins = [ (ite :> cfg_pred); (ite :> cfg_pred) ] }
+        and ph = { phis = [] } in
         let () = add_data_suc1 (ite :> data_suc) cond in
         let () = set_cfg_suc1 ~br (ite :> cfg_suc) control in
         let* () = put (env, ite) in
@@ -132,14 +131,11 @@ let from_anf vb =
         in
         let* phi =
           return (fun (d1, c1) (d2, c2) ->
-            let phi =
-              `Phi ({ data_in = d1 }, { data_in = d2 }, { region }, { data_outs = [] })
-            in
+            let phi = `Phi ({ data_ins = [ d1; d2 ] }, { region }, { data_outs = [] }) in
             let () = set_cfg_suc ~br (region :> cfg_suc) [ c1; c2 ] in
             let () = add_data_suc (phi :> data_suc) [ d1; d2 ] in
-            th_cfg.cfg_in <- c1;
-            el_cfg.cfg_in <- c2;
-            ph.phi <- Some phi;
+            cf.cfg_ins <- [ c1; c2 ];
+            ph.phis <- [ phi ];
             phi)
           <&> br_hndl th
           <&> br_hndl el
@@ -182,7 +178,7 @@ let print_sceleton () =
         match n with
         | `Const (_, { data_outs })
         | `BinOp (_, _, _, { data_outs })
-        | `Phi (_, _, _, { data_outs }) -> List.map (fun c -> (c :> node)) data_outs
+        | `Phi (_, _, { data_outs }) -> List.map (fun c -> (c :> node)) data_outs
         | `Start _ | `Return _ | `ITE _ | `Region _ -> []
       in
       let opt = function
@@ -250,39 +246,33 @@ let print_sceleton () =
             print_sh
             c3;
           upd_queue [ c1; d; c2; c3 ]
-        | `Region ({ cfg_in }, { cfg_in = cfg_in' }, { phi }, { cfg_out }) ->
-          let c1 = (cfg_in :> node) in
-          let c2 = (cfg_in' :> node) in
-          let c3 = (cfg_out :> node) in
-          let phi = Option.map (fun r -> (r :> node)) phi in
+        | `Region ({ cfg_ins }, { phis }, { cfg_out }) ->
+          let cf = List.map (fun i -> (i :> node)) cfg_ins in
+          let co = (cfg_out :> node) in
+          let phis = List.map (fun r -> (r :> node)) phis in
           fprintf
             ppf
-            "Region (*%a, *%a, %a, %a)\n"
+            "Region (*[%a], [%a], %a)\n"
+            (pp_print_list print_sh)
+            cf
+            (pp_print_list print_sh)
+            phis
             print_sh
-            c1
-            print_sh
-            c2
-            (pp_print_option print_sh)
-            phi
-            print_sh
-            c3;
-          upd_queue @@ List.append (opt phi) [ c1; c2; c3 ]
-        | `Phi ({ data_in }, { data_in = data_in' }, { region }, _) ->
-          let d1 = (data_in :> node) in
-          let d2 = (data_in' :> node) in
+            co;
+          upd_queue @@ (co :: cf) @ phis
+        | `Phi ({ data_ins }, { region }, _) ->
+          let dis = List.map (fun i -> (i :> node)) data_ins in
           let r = (region :> node) in
           fprintf
             ppf
-            "Phi (*%a, *%a, *%a, [%a])\n"
-            print_sh
-            d1
-            print_sh
-            d2
+            "Phi (*[%a],  *%a, [%a])\n"
+            (pp_print_list print_sh)
+            dis
             print_sh
             r
             (pp_print_list print_sh)
             ds;
-          upd_queue (d1 :: d2 :: r :: ds))
+          upd_queue @@ (r :: ds) @ dis)
   and print_sh ppf : node -> unit = function
     | `Start _ -> fprintf ppf "Start"
     | `Const (c, _) -> Frontend.Pprint.pp_const ppf c
@@ -299,6 +289,20 @@ let equal () =
   let seen = Hashtbl.create 58 in
   let rec ( = ) x y =
     let lists2 = List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true in
+    let lists2'
+      :  [< `Const of const | `Phi of phi ] list
+      -> [< `Const of const | `Phi of phi ] list
+      -> bool
+      =
+      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
+    in
+    (*to think about it. Maybe separate cast? *)
+    let lists2'' =
+      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
+    in
+    let lists2''' =
+      List.fold_left2 (fun acc x y -> acc && (x :> node) = (y :> node)) true
+    in
     let ds d1 d2 =
       List.fold_left2
         (fun acc x y -> acc && (x :> node) = (y :> node))
@@ -314,7 +318,7 @@ let equal () =
       (match
          match x, y with
          | `Start (c1, { consts = con1 }), `Start (c2, { consts = con2 }) ->
-           lists2 con1 con2 && (c1.cfg_out :> node) = (c2.cfg_out :> node)
+           lists2' con1 con2 && (c1.cfg_out :> node) = (c2.cfg_out :> node)
          | `Return (c1, { returned = None }), `Return (c2, { returned = None }) ->
            (c1.cfg_in :> node) = (c2.cfg_in :> node)
          | `Return (c1, { returned = Some r1 }), `Return (c2, { returned = Some r2 }) ->
@@ -325,23 +329,17 @@ let equal () =
            && (a11.data_in :> node) = (a21.data_in :> node)
            && (a12.data_in :> node) = (a22.data_in :> node)
            && ds d1 d2
-         | `Region (c11, c12, p1, c13), `Region (c21, c22, p2, c23) ->
-           (c11.cfg_in :> node) = (c21.cfg_in :> node)
-           && (c12.cfg_in :> node) = (c22.cfg_in :> node)
-           && (c13.cfg_out :> node) = (c23.cfg_out :> node)
-           &&
-             (match p1.phi, p2.phi with
-             | None, None -> true
-             | Some ph1, Some ph2 -> (ph1 :> node) = (ph2 :> node)
-             | _ -> false)
+         | `Region (cc1, p1, co1), `Region (cc2, p2, co2) ->
+           lists2'' cc1.cfg_ins cc2.cfg_ins
+           && (co1.cfg_out :> node) = (co2.cfg_out :> node)
+           && lists2 p1.phis p2.phis
          | `ITE (c11, d1, c12, c13), `ITE (c21, d2, c22, c23) ->
            (c11.cfg_in :> node) = (c21.cfg_in :> node)
            && (c12.cfg_out :> node) = (c22.cfg_out :> node)
            && (c13.cfg_out :> node) = (c23.cfg_out :> node)
            && (d1.data_in :> node) = (d2.data_in :> node)
-         | `Phi (d11, d12, reg1, d1), `Phi (d21, d22, reg2, d2) ->
-           (d11.data_in :> node) = (d21.data_in :> node)
-           && (d12.data_in :> node) = (d22.data_in :> node)
+         | `Phi (dis1, reg1, d1), `Phi (dis2, reg2, d2) ->
+           lists2''' dis1.data_ins dis2.data_ins
            && ds d1 d2
            && (reg1.region :> node) = (reg2.region :> node)
          | (`Start _ | `Return _ | `Const _ | `BinOp _ | `Phi _ | `ITE _ | `Region _), _
@@ -411,19 +409,17 @@ let%test "if-then-else" =
     , { cfg_out = `Region reg2 }
     , { cfg_out = `Region reg2 } )
   and reg2 =
-    let phi = Some (`Phi phi2) in
-    { cfg_in = `ITE ite2 }, { cfg_in = `ITE ite2 }, { phi }, { cfg_out = `Region reg1 }
+    let phis = [ `Phi phi2 ] in
+    { cfg_ins = [ `ITE ite2; `ITE ite2 ] }, { phis }, { cfg_out = `Region reg1 }
   and reg1 =
-    let phi = Some (`Phi phi1) in
-    { cfg_in = `ITE ite1 }, { cfg_in = `Region reg2 }, { phi }, { cfg_out = `Return fin }
+    let phis = [ `Phi phi1 ] in
+    { cfg_ins = [ `ITE ite1; `Region reg2 ] }, { phis }, { cfg_out = `Return fin }
   and phi2 =
-    ( { data_in = `Const one }
-    , { data_in = `Const two }
+    ( { data_ins = [ `Const one; `Const two ] }
     , { region = `Region reg2 }
     , { data_outs = [ `Phi phi1 ] } )
   and phi1 =
-    ( { data_in = `Const zero }
-    , { data_in = `Phi phi2 }
+    ( { data_ins = [ `Const zero; `Phi phi2 ] }
     , { region = `Region reg1 }
     , { data_outs = [ `Return fin ] } )
   and fin = { cfg_in = `Region reg1 }, { returned = Some (`Phi phi1) }
