@@ -234,7 +234,11 @@ let from_anf vbs =
         and fn = `Function (region, ret, ref [])
         and phis = ref []
         and retd = ref None in
-        let init = globals in
+        let init =
+          match fl with
+          | Frontend.Parsetree.NonRecursive -> globals
+          | Frontend.Parsetree.Recursive -> SMap.add name (fn :> data_pred) globals
+        in
         let env, phis' =
           fold_map (arg :: args) ~init ~f:(fun env (APname { hum_name; _ }) ->
             let ph = `Phi (ref [], ref region, ref []) in
