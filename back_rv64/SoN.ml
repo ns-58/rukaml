@@ -1,23 +1,37 @@
 let todo () = failwith "todo"
 
-type start = cfg_out * consts
-and return = cfg_in * returned
+(*todo use refs instead of size one records*)
+
+type start = cfg_out * consts * fns
+and return = cfg_in * returned * fnc * call_ends
 and const = Frontend.Parsetree.const * data_outs
 and binop = string * data_in * data_in * data_outs
 and ite = cfg_in * data_in * cfg_out * cfg_out
 and region = cfg_ins * phis * cfg_out
 and phi = data_ins * due_region * data_outs
+and stop = cfg_in * returned (* return for program. Not the same with original SoN stop*)
+and fn = region * return * data_outs
+
+and call =
+  cfg_in * data_in * data_in * data_ins (* f, arg, arg list*) * call_end * cfg_outs
+
+and call_end = cl * rets * data_outs * cfg_out
 
 and cfg_suc =
   [ `Return of return
+  | `Stop of stop
   | `ITE of ite
   | `Region of region
+  | `Call of call
+  | `CallEnd of call_end
   ]
 
 and cfg_pred =
   [ `Start of start
   | `ITE of ite
   | `Region of region
+  | `Call of call
+  | `CallEnd of call_end
   ]
 
 and returned = { mutable returned : data_pred option }
@@ -26,24 +40,35 @@ and data_pred =
   [ `Const of const
   | `BinOp of binop
   | `Phi of phi
+  | `CallEnd of call_end
+  | `Function of fn
   ]
 
 and data_suc =
   [ `Return of return
+  | `Stop of stop
   | `BinOp of binop
   | `ITE of ite
   | `Phi of phi
+  | `Call of call
+  | `CallEnd of call_end
   ]
 
+and cl = { mutable call : call }
 and cfg_in = { mutable cfg_in : cfg_pred }
 and cfg_ins = { mutable cfg_ins : cfg_pred list }
 and cfg_out = { mutable cfg_out : cfg_suc }
+and cfg_outs = { mutable cfg_outs : cfg_suc list }
 and data_outs = { mutable data_outs : data_suc list }
 and data_in = { mutable data_in : data_pred }
 and data_ins = { mutable data_ins : data_pred list }
 and consts = { mutable consts : [ `Const of const ] list }
 and due_region = { mutable region : [ `Region of region ] }
 and phis = { mutable phis : [ `Phi of phi ] list }
+and fns = { mutable fns : [ `Function of fn ] list }
+and fnc = { mutable fnc : fn }
+and call_ends = { mutable call_ends : [ `CallEnd of call_end ] list }
+and rets = { mutable rets : [ `Return of return ] list }
 
 type node =
   [ data_pred
@@ -55,21 +80,22 @@ type node =
 
 open Compile_lib.ANF
 open Frontend.Ident
+
+(*todo: use IMap?*)
 module SMap = Map.Make (String)
 open Monads.Store
 
 let ( >>| ) f x = f >>= fun t -> return @@ x t
 let ( let+ ) = ( >>| )
 
-let both f x1 x2 =
-  let* a = f x1 in
-  let+ b = f x2 in
-  a, b
-;;
+(*todo: remove*)
 
 let add_data_suc1 suc : data_pred -> unit = function
-  | `Const (_, ds) | `BinOp (_, _, _, ds) | `Phi (_, _, ds) ->
-    ds.data_outs <- suc :: ds.data_outs
+  | `Const (_, ds)
+  | `BinOp (_, _, _, ds)
+  | `Phi (_, _, ds)
+  | `Function (_, _, ds)
+  | `CallEnd (_, _, ds, _) -> ds.data_outs <- suc :: ds.data_outs
 ;;
 
 type br =
@@ -78,47 +104,85 @@ type br =
 
 let set_cfg_suc1 ?(br = Then) suc : cfg_pred -> unit = function
   | `ITE (_, _, c, _) when br = Then -> c.cfg_out <- suc
-  | `Start (c, _) | `ITE (_, _, _, c) | `Region (_, _, c) -> c.cfg_out <- suc
+  | `Start (c, _, _) | `ITE (_, _, _, c) | `Region (_, _, c) | `CallEnd (_, _, _, c) ->
+    c.cfg_out <- suc
+  | `Call (_, _, _, _, _, cc) -> cc.cfg_outs <- suc :: cc.cfg_outs
 ;;
 
-let find k = get >>| fst >>| SMap.find k
+let env = get >>| fst
 let add k v = get >>= fun (env, control) -> put (SMap.add k v env, control)
 let add_data_suc suc = List.iter @@ add_data_suc1 suc
 let set_cfg_suc ?(br = Then) suc = List.iter @@ set_cfg_suc1 suc ~br
 
 (* todo tail-rec? *)
-let from_anf vb =
+let from_anf vbs =
   let c = { consts = [] } in
   let r = { returned = None } in
-  let rec start_node = `Start ({ cfg_out = (fin_node :> cfg_suc) }, c)
-  and fin_node = `Return (rci, r)
-  and rci = { cfg_in = (start_node :> cfg_pred) } in
+  let fns = { fns = [] } in
+  let rec start_node = `Start ({ cfg_out = (fin_node :> cfg_suc) }, c, fns)
+  and fin_node = `Stop (ret_cfg_in, r)
+  and ret_cfg_in = { cfg_in = (start_node :> cfg_pred) } in
   let add_const n = c.consts <- n :: c.consts in
-  match vb with
-  | _, { hum_name = "main"; _ }, e ->
-    let helper_a ~br = function
+  let vb local_fin_node =
+    let helper_a a env =
+      match a with
       | AConst c ->
         let c = `Const (c, { data_outs = [] }) in
         add_const c;
-        return c
-      | AVar { hum_name = name; _ } -> find name
+        c
+      | AVar { hum_name = name; _ } -> SMap.find name env
       | _ -> todo ()
     in
     let rec helper_c ~br = function
       | CApp (APrimitive op, a1, [ a2 ]) when is_infix_binop op ->
-        let+ a1, a2 = both (helper_a ~br) a1 a2 in
+        let+ env = env in
+        let a1, a2 = helper_a a1 env, helper_a a2 env in
         let bo = `BinOp (op, { data_in = a1 }, { data_in = a2 }, { data_outs = [] }) in
         add_data_suc bo [ a1; a2 ];
         bo
-      | CAtom i -> helper_a ~br i
+      | CApp (f, arg, args) ->
+        let* env, control = get in
+        let helper_a a = helper_a a env in
+        (match helper_a f with
+         | `Function ((((cfg_ins, phis, _) : region) as region), (_, _, _, call_ends), _)
+           as fn ->
+           let arg = helper_a arg in
+           let args = List.map helper_a args in
+           let cos = { cfg_outs = [ (`Region region :> cfg_suc) ] } in
+           let co = { cfg_out = local_fin_node } in
+           let d = { data_outs = [] } in
+           let rec call =
+             ( { cfg_in = control }
+             , { data_in = fn }
+             , { data_in = arg }
+             , { data_ins = args }
+             , call_end
+             , cos )
+           and call_end = { call }, rs, d, co
+           and rs = { rets = [] } in
+           let call_end = `CallEnd call_end in
+           let call = `Call call in
+           set_cfg_suc1 ~br call control;
+           cfg_ins.cfg_ins <- call :: cfg_ins.cfg_ins;
+           List.iter2
+             (fun (`Phi (di, _, _) as phi) arg ->
+                add_data_suc1 phi arg;
+                di.data_ins <- arg :: di.data_ins)
+             phis.phis
+             (arg :: args);
+           call_ends.call_ends <- call_end :: call_ends.call_ends;
+           add_data_suc1 call fn;
+           let+ () = put (env, call_end) in
+           call_end
+         | _ -> todo ())
+      | CAtom i -> env >>| helper_a i
       | CIte (cond, th, el) ->
         let* cond = helper_c ~br cond in
         let* env, control = get in
         let rec ite =
           let cfg_out = (region :> cfg_suc) in
           `ITE ({ cfg_in = control }, { data_in = cond }, { cfg_out }, { cfg_out })
-        and region : [ `Region of region ] =
-          `Region (cf, ph, { cfg_out = (fin_node :> cfg_suc) })
+        and region : [ `Region of region ] = `Region (cf, ph, { cfg_out = local_fin_node })
         and cf = { cfg_ins = [ (ite :> cfg_pred); (ite :> cfg_pred) ] }
         and ph = { phis = [] } in
         let () = add_data_suc1 (ite :> data_suc) cond in
@@ -141,7 +205,6 @@ let from_anf vb =
           <&> br_hndl el
         in
         put (env, (region :> cfg_pred)) >>| fun () -> phi
-      | _ -> todo ()
     and helper ?(br = Then) =
       let open Frontend.Typedtree in
       function
@@ -151,19 +214,50 @@ let from_anf vb =
         helper e
       | _ -> todo ()
     in
-    run (helper e) (SMap.empty, (start_node :> cfg_pred))
-    |> fun ((_, control), returned) ->
-    r.returned <- Some returned;
-    add_data_suc1 (fin_node :> data_suc) returned;
-    rci.cfg_in <- (control :> cfg_pred);
-    (match start_node, fin_node with
-     | `Start s, `Return f -> s, f)
-  | _ -> todo ()
+    helper
+  in
+  (* todo error handling *)
+  let open Base.List in
+  Base.List.fold_until
+    vbs
+    ~init:SMap.empty
+    ~finish:(failwith "have no main")
+    ~f:(fun globals (_, { hum_name; _ }, e) ->
+      match hum_name, Compile_lib.ANF.group_abstractions e with
+      | "main", ([], e) ->
+        let (_, control), returned =
+          run (vb fin_node e) (globals, (start_node :> cfg_pred))
+        in
+        r.returned <- Some returned;
+        ret_cfg_in.cfg_in <- (control :> cfg_pred);
+        (match start_node, fin_node with
+         | `Start s, `Stop f -> Stop (s, f))
+      | name, (arg :: args, b) ->
+        let cfg_ins, phis, data_ins, data_outs, call_ends = [], [], [], [], [] in
+        let rec reg = { cfg_ins }, ph, { cfg_out = return }
+        and ret = ret_cfg_in, rd, { fnc = fn }, { call_ends }
+        and fn = reg, ret, { data_outs }
+        and region = `Region reg
+        and return = `Return ret
+        and ph = { phis }
+        and rd = { returned = None } in
+        let env, phis' =
+          fold_map (arg :: args) ~init:globals ~f:(fun env (APname { hum_name; _ }) ->
+            let ph = `Phi ({ data_ins }, { region }, { data_outs = [] }) in
+            SMap.add hum_name (ph :> data_pred) env, ph)
+        in
+        ph.phis <- phis';
+        let (_, control), returned = run (vb return b) (env, (region :> cfg_pred)) in
+        rd.returned <- Some returned;
+        ret_cfg_in.cfg_in <- (control :> cfg_pred);
+        let f = `Function fn in
+        fns.fns <- f :: fns.fns;
+        Continue (SMap.add name (f :> data_pred) globals)
+      | _ -> todo ())
 ;;
 
-open Compile_lib
-
-let print_sceleton () =
+(*
+   let print_sceleton () =
   let seen = Hashtbl.create 58 in
   let open Format in
   let rec print_full ppf : node list -> unit = function
@@ -285,6 +379,7 @@ let print_sceleton () =
   fun n -> print_full Format.std_formatter [ n ]
 ;;
 
+(* could be false-positive rarely I guess*)
 let equal () =
   let seen = Hashtbl.create 58 in
   let rec ( = ) x y =
@@ -412,4 +507,4 @@ let%test "if-then-else" =
   let ( = ) = equal () in
   `Start (from_string_vb "let main =  if true then 0 else if false then 1 else 2     ")
   = `Start start
-;;
+;; *)
