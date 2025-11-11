@@ -7,7 +7,8 @@
 (library
  (name rv64_impl)
  (public_name MiniML_rv64.impl)
- (modules RV64_impl Machine SoN)
+ (modules RV64_impl Machine SoN soNNodes)
+ (modules_without_implementation soNNodes)
  (wrapped false)
  (libraries rukaml.cconv rukaml.compile rukaml.frontend)
  (preprocess
