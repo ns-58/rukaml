@@ -12,11 +12,11 @@ let ( >>| ) f x = f >>= fun t -> return @@ x t
 let ( let+ ) = ( >>| )
 
 let add_data_suc1 suc : data_pred -> unit = function
-  | `Const (_, ds)
-  | `BinOp (_, _, _, ds)
-  | `Phi (_, _, ds)
-  | `Function (_, _, ds)
-  | `CallEnd (_, _, ds, _) -> ds := suc :: !ds
+  | `Const (_, (_, ds))
+  | `BinOp (_, (_, _, _, ds))
+  | `Phi (_, (_, _, ds))
+  | `Function (_, (_, _, ds))
+  | `CallEnd (_, (_, _, ds, _)) -> ds := suc :: !ds
 ;;
 
 type br =
@@ -24,10 +24,12 @@ type br =
   | Else
 
 let set_cfg_suc1 ?(br = Then) suc : cfg_pred -> unit = function
-  | `ITE (_, _, c, _) when br = Then -> c := suc
-  | `Start (c, _, _) | `ITE (_, _, _, c) | `Region (_, _, c) | `CallEnd (_, _, _, c) ->
-    c := suc
-  | `Call (_, _, _, _, _, cc) -> cc := suc :: !cc
+  | `ITE (_, (_, _, c, _)) when br = Then -> c := suc
+  | `Start (_, (c, _, _))
+  | `ITE (_, (_, _, _, c))
+  | `Region (_, (_, _, c))
+  | `CallEnd (_, (_, _, _, c)) -> c := suc
+  | `Call (_, (_, _, _, _, _, cc)) -> cc := suc :: !cc
 ;;
 
 let env = get >>| fst
@@ -40,15 +42,15 @@ let from_anf vbs =
   let consts = ref [] in
   let retd = ref None in
   let functions = ref [] in
-  let rec start_node = `Start (ref (fin_node :> cfg_suc), consts, functions)
-  and fin_node = `Stop (ret_cfg_in, retd)
+  let rec start_node = `Start (gensym (), (ref (fin_node :> cfg_suc), consts, functions))
+  and fin_node = `Stop (gensym (), (ret_cfg_in, retd))
   and ret_cfg_in = ref (start_node :> cfg_pred) in
   let add_const n = consts := n :: !consts in
   let vb local_fin_node =
     let helper_a a env =
       match a with
       | AConst c ->
-        let c = `Const (c, ref []) in
+        let c = `Const (gensym (), (c, ref [])) in
         add_const c;
         c
       | AVar { hum_name = name; _ } -> SMap.find name env
@@ -58,7 +60,7 @@ let from_anf vbs =
       | CApp (APrimitive op, a1, [ a2 ]) when is_infix_binop op ->
         let+ env = env in
         let a1, a2 = helper_a a1 env, helper_a a2 env in
-        let bo = `BinOp (op, ref a1, ref a2, ref []) in
+        let bo = `BinOp (gensym (), (op, ref a1, ref a2, ref [])) in
         add_data_suc bo [ a1; a2 ];
         bo
       | CApp (f, arg, args) ->
@@ -66,24 +68,28 @@ let from_anf vbs =
         let helper_a a = helper_a a env in
         (match helper_a f with
          | `Function
-             ( (`Region (cfg_ins, phis, _) as region)
-             , (`Return (_, _, _, call_ends) as ret)
-             , _ ) as fn ->
+             ( _
+             , ( (`Region (_, (cfg_ins, phis, _)) as region)
+               , (`Return (_, (_, _, _, call_ends)) as ret)
+               , _ ) ) as fn ->
            let arg = helper_a arg in
            let args = List.map helper_a args in
            let rec call =
              `Call
-               ( ref control
-               , ref fn
-               , ref arg
-               , ref args
-               , call_end
-               , ref [ (region :> cfg_suc) ] )
-           and call_end = `CallEnd (ref call, ref [ ret ], ref [], ref local_fin_node) in
+               ( gensym ()
+               , ( ref control
+                 , ref fn
+                 , ref arg
+                 , ref args
+                 , call_end
+                 , ref [ (region :> cfg_suc) ] ) )
+           and call_end =
+             `CallEnd (gensym (), (ref call, ref [ ret ], ref [], ref local_fin_node))
+           in
            set_cfg_suc1 ~br (call :> cfg_suc) control;
            cfg_ins := (call :> cfg_pred) :: !cfg_ins;
            List.iter2
-             (fun (`Phi (data_ins, _, _) as phi) arg ->
+             (fun (`Phi (_, (data_ins, _, _)) as phi) arg ->
                 add_data_suc1 phi arg;
                 data_ins := arg :: !data_ins)
              !phis
@@ -99,8 +105,8 @@ let from_anf vbs =
         let* env, control = get in
         let rec ite =
           let cfg_out = (region :> cfg_suc) in
-          `ITE (ref control, ref cond, ref cfg_out, ref cfg_out)
-        and region = `Region (cfg_ins, phis, ref local_fin_node)
+          `ITE (gensym (), (ref control, ref cond, ref cfg_out, ref cfg_out))
+        and region = `Region (gensym (), (cfg_ins, phis, ref local_fin_node))
         and cfg_ins = ref [ (ite :> cfg_pred); (ite :> cfg_pred) ]
         and phis = ref [] in
         let () = add_data_suc1 (ite :> data_suc) cond in
@@ -113,7 +119,7 @@ let from_anf vbs =
         in
         let* phi =
           return (fun (d1, c1) (d2, c2) ->
-            let phi = `Phi (ref [ d1; d2 ], ref region, ref []) in
+            let phi = `Phi (gensym (), (ref [ d1; d2 ], ref region, ref [])) in
             let () = set_cfg_suc ~br (region :> cfg_suc) [ c1; c2 ] in
             let () = add_data_suc (phi :> data_suc) [ d1; d2 ] in
             cfg_ins := [ c1; c2 ];
@@ -149,12 +155,11 @@ let from_anf vbs =
         retd := Some returned;
         ret_cfg_in := (control :> cfg_pred);
         (match start_node, fin_node with
-         | `Start s, `Stop f -> Stop (s, f))
+         | `Start (_, s), `Stop (_, f) -> Stop (s, f))
       | name, (arg :: args, b) ->
-        let rec region : [ `Region of region ] =
-          `Region (ref [], phis, ref (ret :> cfg_suc))
-        and ret : [ `Return of return ] = `Return (ret_cfg_in, retd, ref fn, ref [])
-        and fn = `Function (region, ret, ref [])
+        let rec region = `Region (gensym (), (ref [], phis, ref (ret :> cfg_suc)))
+        and ret = `Return (gensym (), (ret_cfg_in, retd, ref fn, ref []))
+        and fn = `Function (gensym (), (region, ret, ref []))
         and phis = ref []
         and retd = ref None in
         let init =
@@ -164,7 +169,7 @@ let from_anf vbs =
         in
         let env, phis' =
           fold_map (arg :: args) ~init ~f:(fun env (APname { hum_name; _ }) ->
-            let ph = `Phi (ref [], ref region, ref []) in
+            let ph = `Phi (gensym (), (ref [], ref region, ref [])) in
             SMap.add hum_name (ph :> data_pred) env, ph)
         in
         phis := phis';
