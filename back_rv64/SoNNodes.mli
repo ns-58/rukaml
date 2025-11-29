@@ -2,12 +2,14 @@ type id = int
 
 (*todo: remove unused mutables*)
 
+(*nodes starting basic blocks*)
 type sched_m =
   [ `Start of id * start
   | `ITEProj of id * ite_proj
   | `Region of id * region
   ]
 
+(*floating node*)
 and sched_sl = [ `BinOp of id * binop ]
 and start = sched_sl list ref * cfg_out * consts * [ `Function of id * fn ] list ref
 and ite = cfg_in * data_in * [ `ITEProj of id * ite_proj ] * [ `ITEProj of id * ite_proj ]

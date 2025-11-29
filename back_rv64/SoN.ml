@@ -224,6 +224,7 @@ end = struct
   ;;
 end
 
+(* schedule each data node to the first control block where they are dominated by their inputs *)
 let sched_early
       (`Start (_, (_, _, _, { contents = funcs })) as start)
       (`Stop (_, returned))
@@ -290,11 +291,16 @@ let sched_early
       | `Start _ -> continue minim
       | `Call (_, (cin, _, _, _, _, _)) | `ITEProj (_, (`ITE (_, (cin, _, _, _)), _, _))
         -> find [ !cin ]
-      | `Region (_, (_, { contents = cfg_preds }, _, _)) -> find cfg_preds
+      | `Region (_, (_, { contents = cfg_preds }, _, _)) ->
+        find cfg_preds
+        (*in original impl, region depth is succesor of depth of
+      the least common ancestor of branches. Does it important?  *)
       | `CallEnd (_, ({ contents = call }, _, _, _)) -> find [ (call :> cfg_pred) ]
     in
     process_node (Fun.const []) k
   in
+  (*to think: produced by CC "closure-implementing" params could 
+  be not fixed to due function region for better scheduling *)
   List.iter (function
     | { contents = Some v } -> process_node (Fun.const []) Env.empty ignore v
     | { contents = None } -> failwith "unreachable" (*todo: avoiding that on type level*))
@@ -304,3 +310,8 @@ let sched_early
          | `Function (_, (_, `Return (_, (_, returned, _, _)), _)) -> returned)
        funcs
 ;;
+
+(*move data nodes to a block between the first block in the early schedule, and the last 
+control block where they dominate all their uses. The placement is subject to the condition 
+that it is in the ??shallowest loop nest possible??, and is as control dependent as possible.*)
+let sched_late = todo ()
