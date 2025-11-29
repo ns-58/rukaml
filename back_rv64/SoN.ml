@@ -243,18 +243,18 @@ let sched_early
   let rec helper env loc_deepest wt =
     let upd_deepest = min loc_deepest in
     match wt with
-    | [] -> ()
+    | [] -> env
     | ((sched_sl, deepest), []) :: tl ->
       let deepest' = upd_deepest deepest in
       set sched_sl @@ snd deepest';
       helper env deepest' tl
     | (((sched_sl, deepest) as sd), hd :: itl) :: tl ->
-      let continue m = helper env (upd_deepest m) ((sd, itl) :: tl) in
+      let continue env m = helper env (upd_deepest m) ((sd, itl) :: tl) in
       let tl' () = ((sched_sl, upd_deepest deepest), itl) :: tl in
       process_node tl' env continue hd
   and process_node tl' env continue (n : data_pred) =
     match n with
-    | `Const _ -> continue minim
+    | `Const _ -> continue env minim
     | `BinOp (_, ({ contents = None }, _, { contents = a1 }, { contents = a2 }, _)) as bo
       -> helper env minim ((((bo :> sched_sl), minim), [ a1; a2 ]) :: tl' ())
     | `BinOp (_, ({ contents = Some m }, _, _, _, _)) ->
@@ -268,7 +268,7 @@ let sched_early
     let rec aux loc_deepest wt env =
       let upd_deepest = min loc_deepest in
       match wt with
-      | [] -> k loc_deepest
+      | [] -> k env loc_deepest
       | (((#sched_m as m), (depth, _)), []) :: tl ->
         let depth' = depth + 1 in
         aux (depth', m) tl @@ Env.add_self env (depth + 1) m
@@ -276,19 +276,19 @@ let sched_early
         let deepest' = upd_deepest deepest in
         aux deepest' tl @@ Env.add env c deepest'
       | (((sched_sl, deepest) as sd), hd :: itl) :: tl ->
-        let continue m = aux (upd_deepest m) ((sd, itl) :: tl) env in
+        let continue env m = aux (upd_deepest m) ((sd, itl) :: tl) env in
         let tl' () = ((sched_sl, upd_deepest deepest), itl) :: tl in
         process_node tl' continue env hd
     and process_node tl' continue env (n : cfg_pred) =
       let find preds =
         match Env.find env n with
-        | m -> continue m
+        | m -> continue env m
         | exception Not_found ->
           let wt' = ((n, minim), preds) :: tl' () in
           aux minim wt' env
       in
       match n with
-      | `Start _ -> continue minim
+      | `Start _ -> continue env minim
       | `Call (_, (cin, _, _, _, _, _)) | `ITEProj (_, (`ITE (_, (cin, _, _, _)), _, _))
         -> find [ !cin ]
       | `Region (_, (_, { contents = cfg_preds }, _, _)) ->
@@ -301,9 +301,12 @@ let sched_early
   in
   (*to think: produced by CC "closure-implementing" params could 
   be not fixed to due function region for better scheduling *)
-  List.iter (function
-    | { contents = Some v } -> process_node (Fun.const []) Env.empty ignore v
-    | { contents = None } -> failwith "unreachable" (*todo: avoiding that on type level*))
+  List.fold_left
+    (fun env -> function
+       | { contents = Some v } -> process_node (Fun.const []) env Fun.const v
+       | { contents = None } ->
+         failwith "unreachable" (*todo: avoiding that on type level*))
+    Env.empty
   @@ List.cons returned
   @@ List.map
        (function

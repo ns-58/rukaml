@@ -25,6 +25,7 @@ module Store : sig
   val get : ('acc, 'acc) t
   val put : 'acc -> ('acc, unit) t
   val ( <*> ) : 'acc 'a 'b. ('acc, 'a -> 'b) t -> ('acc, 'a) t -> ('acc, 'b) t
+  val ( <&> ) : 'acc 'a 'b. ('acc, 'a -> 'b) t -> ('acc, 'a) t -> ('acc, 'b) t
   val run : ('acc, 'a) t -> 'acc -> 'acc * 'a
 end = struct
   type ('acc, 'a) t = 'acc -> 'acc * 'a
@@ -39,6 +40,12 @@ end = struct
     let acc2, f = f acc in
     let acc3, arg = arg acc2 in
     acc3, f arg
+  ;;
+
+  let ( <&> ) : 'acc 'a 'b. ('acc, 'a -> 'b) t -> ('acc, 'a) t -> ('acc, 'b) t =
+    fun f arg acc ->
+    let (_, f), (_, arg) = f acc, arg acc in
+    acc, f arg
   ;;
 
   let ( >>= ) : 'acc 'a 'b. ('acc, 'a) t -> ('a -> ('acc, 'b) t) -> ('acc, 'b) t =
